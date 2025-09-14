@@ -3,13 +3,13 @@ Mol-DETR: A Lightweight Transformer Framework with Bond Anchor Points for Accura
 
 ## Introduction
 This is a PyTorch implementation of the research: [A Lightweight Transformer Framework with Bond Anchor Points for Accurate 2D Molecular Structure Recognition and Reconstruction](https://github.com/ksubowu/moldetr/blob/master/moldetr_git.png)
-![Graph abstract](https://github.com/ksubowu/moldetr/blob/master/image/Graphical%20abstract.png) 
+![Graph abstract](https://github.com/ksubowu/moldetr/blob/main/image/Graphical%20abstract.png) 
 
 ## Environment
 ```
 python=3.11.9
 pip install -f requirements.txt
-pip install rfdetr [https://github.com/roboflow/rf-detr]
+pip install [rfdetr](https://github.com/roboflow/rf-detr)
 ```
 
 ### train 

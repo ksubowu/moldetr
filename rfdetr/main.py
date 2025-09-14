@@ -1,21 +1,3 @@
-# ------------------------------------------------------------------------
-# RF-DETR
-# Copyright (c) 2025 Roboflow. All Rights Reserved.
-# Licensed under the Apache License, Version 2.0 [see LICENSE for details]
-# ------------------------------------------------------------------------
-# Modified from LW-DETR (https://github.com/Atten4Vis/LW-DETR)
-# Copyright (c) 2024 Baidu. All Rights Reserved.
-# ------------------------------------------------------------------------
-# Modified from Conditional DETR (https://github.com/Atten4Vis/ConditionalDETR)
-# Copyright (c) 2021 Microsoft. All Rights Reserved.
-# ------------------------------------------------------------------------
-# Modified from DETR (https://github.com/facebookresearch/detr)
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
-# ------------------------------------------------------------------------
-
-"""
-cleaned main file
-"""
 import argparse
 import ast
 import copy
@@ -30,12 +12,10 @@ from copy import deepcopy
 from logging import getLogger
 from pathlib import Path
 from typing import DefaultDict, List, Callable
-
 import numpy as np
 import torch
 from peft import LoraConfig, get_peft_model
 from torch.utils.data import DataLoader, DistributedSampler
-
 import rfdetr.util.misc as utils
 from rfdetr.datasets import build_dataset, get_coco_api_from_dataset
 from rfdetr.engine import evaluate, train_one_epoch
@@ -45,20 +25,15 @@ from rfdetr.util.drop_scheduler import drop_scheduler
 from rfdetr.util.files import download_file
 from rfdetr.util.get_param_dicts import get_param_dict
 from rfdetr.util.utils import ModelEma, BestMetricHolder, clean_state_dict
-
 if str(os.environ.get("USE_FILE_SYSTEM_SHARING", "False")).lower() in ["true", "1"]:
     import torch.multiprocessing
     torch.multiprocessing.set_sharing_strategy('file_system')
-
 logger = getLogger(__name__)
-
 HOSTED_MODELS = {
     "rf-detr-base.pth": "https://storage.googleapis.com/rfdetr/rf-detr-base-coco.pth",
-    # below is a less converged model that may be better for finetuning but worse for inference
     "rf-detr-base-2.pth": "https://storage.googleapis.com/rfdetr/rf-detr-base-2.pth",
     "rf-detr-large.pth": "https://storage.googleapis.com/rfdetr/rf-detr-large.pth"
 }
-
 def download_pretrain_weights(pretrain_weights: str, redownload=False):
     if pretrain_weights in HOSTED_MODELS:
         if redownload or not os.path.exists(pretrain_weights):
@@ -69,7 +44,6 @@ def download_pretrain_weights(pretrain_weights: str, redownload=False):
                 HOSTED_MODELS[pretrain_weights],
                 pretrain_weights,
             )
-
 class Model:
     def __init__(self, **kwargs):
         args = populate_args(**kwargs)
@@ -82,15 +56,11 @@ class Model:
                 checkpoint = torch.load(args.pretrain_weights, map_location='cpu', weights_only=False)
             except Exception as e:
                 print(f"Failed to load pretrain weights: {e}")
-                # re-download weights if they are corrupted
                 print("Failed to load pretrain weights, re-downloading")
                 download_pretrain_weights(args.pretrain_weights, redownload=True)
                 checkpoint = torch.load(args.pretrain_weights, map_location='cpu', weights_only=False)
-
-            # Extract class_names from checkpoint if available
             if 'args' in checkpoint and hasattr(checkpoint['args'], 'class_names'):
                 self.class_names = checkpoint['args'].class_names
-                
             checkpoint_num_classes = checkpoint['model']['class_embed.bias'].shape[0]
             if checkpoint_num_classes != args.num_classes + 1:
                 logger.warning(
@@ -98,8 +68,6 @@ class Model:
                     f"reinitializing detection head with {checkpoint_num_classes - 1} classes"
                 )
                 self.reinitialize_detection_head(checkpoint_num_classes)
-            # add support to exclude_keys
-            # e.g., when load object365 pretrain, do not load `class_embed.[weight, bias]`
             if args.pretrain_exclude_keys is not None:
                 assert isinstance(args.pretrain_exclude_keys, list)
                 for exclude_key in args.pretrain_exclude_keys:
@@ -116,16 +84,12 @@ class Model:
                     except:
                         print(f"Failed to load {modify_key_to_load}, deleting from checkpoint")
                         checkpoint['model'].pop(modify_key_to_load)
-
-            # we may want to resume training with a smaller number of groups for group detr
             num_desired_queries = args.num_queries * args.group_detr
             query_param_names = ["refpoint_embed.weight", "query_feat.weight"]
             for name, state in checkpoint['model'].items():
                 if any(name.endswith(x) for x in query_param_names):
                     checkpoint['model'][name] = state[:num_desired_queries]
-
             self.model.load_state_dict(checkpoint['model'], strict=False)
-
         if args.backbone_lora:
             print("Applying LORA to backbone")
             lora_config = LoraConfig(
@@ -133,23 +97,20 @@ class Model:
                 lora_alpha=16,
                 use_dora=True,
                 target_modules=[
-                    "q_proj", "v_proj", "k_proj",  # covers OWL-ViT
-                    "qkv", # covers open_clip ie Siglip2
-                    "query", "key", "value", "cls_token", "register_tokens", # covers Dinov2 with windowed attn
+                    "q_proj", "v_proj", "k_proj",  
+                    "qkv", 
+                    "query", "key", "value", "cls_token", "register_tokens", 
                 ]
             )
             self.model.backbone[0].encoder = get_peft_model(self.model.backbone[0].encoder, lora_config)
         self.model = self.model.to(self.device)
         self.criterion, self.postprocessors = build_criterion_and_postprocessors(args)
         self.stop_early = False
-    
     def reinitialize_detection_head(self, num_classes):
         self.model.reinitialize_detection_head(num_classes)
-
     def request_early_stop(self):
         self.stop_early = True
         print("Early stopping requested, will complete current epoch and stop")
-
     def train(self, callbacks: DefaultDict[str, List[Callable]], **kwargs):
         currently_supported_callbacks = ["on_fit_epoch_end", "on_train_batch_start", "on_train_end"]
         for key in callbacks.keys():
@@ -163,49 +124,36 @@ class Model:
         print("git:\n  {}\n".format(utils.get_sha()))
         print(args)
         device = torch.device(args.device)
-        
-        # fix the seed for reproducibility
         seed = args.seed + utils.get_rank()
         torch.manual_seed(seed)
         np.random.seed(seed)
         random.seed(seed)
-
         criterion, postprocessors = build_criterion_and_postprocessors(args)
         model = self.model
         model.to(device)
-
         model_without_ddp = model
         if args.distributed:
             if args.sync_bn:
                 model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
             model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
             model_without_ddp = model.module
-
         n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print('number of params:', n_parameters)
         param_dicts = get_param_dict(args, model_without_ddp)
-
         param_dicts = [p for p in param_dicts if p['params'].requires_grad]
-
         optimizer = torch.optim.AdamW(param_dicts, lr=args.lr, 
                                     weight_decay=args.weight_decay)
-        # Choose the learning rate scheduler based on the new argument
-
         dataset_train = build_dataset(image_set='train', args=args, resolution=args.resolution)
         dataset_val = build_dataset(image_set='val', args=args, resolution=args.resolution)
         dataset_test = build_dataset(image_set='test', args=args, resolution=args.resolution)
-
-        # for cosine annealing, calculate total training steps and warmup steps
         total_batch_size_for_lr = args.batch_size * utils.get_world_size() * args.grad_accum_steps
         num_training_steps_per_epoch_lr = (len(dataset_train) + total_batch_size_for_lr - 1) // total_batch_size_for_lr
         total_training_steps_lr = num_training_steps_per_epoch_lr * args.epochs
         warmup_steps_lr = num_training_steps_per_epoch_lr * args.warmup_epochs
         def lr_lambda(current_step: int):
             if current_step < warmup_steps_lr:
-                # Linear warmup
                 return float(current_step) / float(max(1, warmup_steps_lr))
             else:
-                # Cosine annealing from multiplier 1.0 down to lr_min_factor
                 if args.lr_scheduler == 'cosine':
                     progress = float(current_step - warmup_steps_lr) / float(max(1, total_training_steps_lr - warmup_steps_lr))
                     return args.lr_min_factor + (1 - args.lr_min_factor) * 0.5 * (1 + math.cos(math.pi * progress))
@@ -215,7 +163,6 @@ class Model:
                     else:
                         return 0.1
         lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
-
         if args.distributed:
             sampler_train = DistributedSampler(dataset_train)
             sampler_val = DistributedSampler(dataset_val, shuffle=False)
@@ -224,7 +171,6 @@ class Model:
             sampler_train = torch.utils.data.RandomSampler(dataset_train)
             sampler_val = torch.utils.data.SequentialSampler(dataset_val)
             sampler_test = torch.utils.data.SequentialSampler(dataset_test)
-
         effective_batch_size = args.batch_size * args.grad_accum_steps
         min_batches = kwargs.get('min_batches', 5)
         if len(dataset_train) < effective_batch_size * min_batches:
@@ -252,24 +198,19 @@ class Model:
                 collate_fn=utils.collate_fn, 
                 num_workers=args.num_workers
             )
-        
         data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
                                     drop_last=False, collate_fn=utils.collate_fn, 
                                     num_workers=args.num_workers)
         data_loader_test = DataLoader(dataset_test, args.batch_size, sampler=sampler_test,
                                     drop_last=False, collate_fn=utils.collate_fn, 
                                     num_workers=args.num_workers)
-
         base_ds = get_coco_api_from_dataset(dataset_val)
         base_ds_test = get_coco_api_from_dataset(dataset_test)
         if args.use_ema:
             self.ema_m = ModelEma(model_without_ddp, decay=args.ema_decay, tau=args.ema_tau)
         else:
             self.ema_m = None
-
-
         output_dir = Path(args.output_dir)
-        
         if  utils.is_main_process():
             print("Get benchmark")
             if args.do_benchmark:
@@ -277,7 +218,6 @@ class Model:
                 bm = benchmark(benchmark_model.float(), dataset_val, output_dir)
                 print(json.dumps(bm, indent=2))
                 del benchmark_model
-        
         if args.resume:
             checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
             model_without_ddp.load_state_dict(checkpoint['model'], strict=True)
@@ -291,15 +231,12 @@ class Model:
                 optimizer.load_state_dict(checkpoint['optimizer'])
                 lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
                 args.start_epoch = checkpoint['epoch'] + 1
-
         if args.eval:
             test_stats, coco_evaluator = evaluate(
                 model, criterion, postprocessors, data_loader_val, base_ds, device, args)
             if args.output_dir:
                 utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
             return
-        
-        # for drop
         total_batch_size = effective_batch_size * utils.get_world_size()
         num_training_steps_per_epoch = (len(dataset_train) + total_batch_size - 1) // total_batch_size
         schedules = {}
@@ -308,13 +245,11 @@ class Model:
                 args.dropout, args.epochs, num_training_steps_per_epoch,
                 args.cutoff_epoch, args.drop_mode, args.drop_schedule)
             print("Min DO = %.7f, Max DO = %.7f" % (min(schedules['do']), max(schedules['do'])))
-
         if args.drop_path > 0:
             schedules['dp'] = drop_scheduler(
                 args.drop_path, args.epochs, num_training_steps_per_epoch,
                 args.cutoff_epoch, args.drop_mode, args.drop_schedule)
             print("Min DP = %.7f, Max DP = %.7f" % (min(schedules['dp']), max(schedules['dp'])))
-
         print("Start training")
         start_time = time.time()
         best_map_holder = BestMetricHolder(use_ema=args.use_ema)
@@ -326,7 +261,6 @@ class Model:
             epoch_start_time = time.time()
             if args.distributed:
                 sampler_train.set_epoch(epoch)
-
             model.train()
             criterion.train()
             train_stats = train_one_epoch(
@@ -338,7 +272,6 @@ class Model:
             train_epoch_time_str = str(datetime.timedelta(seconds=int(train_epoch_time)))
             if args.output_dir:
                 checkpoint_paths = [output_dir / 'checkpoint.pth']
-                # extra checkpoint before LR drop and every `checkpoint_interval` epochs
                 if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % args.checkpoint_interval == 0:
                     checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
                 for checkpoint_path in checkpoint_paths:
@@ -354,11 +287,8 @@ class Model:
                             'ema_model': self.ema_m.module.state_dict(),
                         })
                     if not args.dont_save_weights:
-                        # create checkpoint dir
                         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-                        
                         utils.save_on_master(weights, checkpoint_path)
-
             with torch.inference_mode():
                 test_stats, coco_evaluator = evaluate(
                     model, criterion, postprocessors, data_loader_val, base_ds, device, args=args
@@ -401,8 +331,6 @@ class Model:
                             'args': args,
                         }, checkpoint_path)
             log_stats.update(best_map_holder.summary())
-            
-            # epoch parameters
             ep_paras = {
                     'epoch': epoch,
                     'n_parameters': n_parameters
@@ -419,8 +347,6 @@ class Model:
             if args.output_dir and utils.is_main_process():
                 with (output_dir / "log.txt").open("a") as f:
                     f.write(json.dumps(log_stats) + "\n")
-
-                # for evaluation logs
                 if coco_evaluator is not None:
                     (output_dir / 'eval').mkdir(exist_ok=True)
                     if "bbox" in coco_evaluator.coco_eval:
@@ -430,51 +356,38 @@ class Model:
                         for name in filenames:
                             torch.save(coco_evaluator.coco_eval["bbox"].eval,
                                     output_dir / "eval" / name)
-            
             for callback in callbacks["on_fit_epoch_end"]:
                 callback(log_stats)
-
             if self.stop_early:
                 print(f"Early stopping requested, stopping at epoch {epoch}")
                 break
-
         best_is_ema = best_map_ema_5095 > best_map_5095
-        
         if utils.is_main_process():
             if best_is_ema:
                 shutil.copy2(output_dir / 'checkpoint_best_ema.pth', output_dir / 'checkpoint_best_total.pth')
             else:
                 shutil.copy2(output_dir / 'checkpoint_best_regular.pth', output_dir / 'checkpoint_best_total.pth')
-            
             utils.strip_checkpoint(output_dir / 'checkpoint_best_total.pth')
-        
             best_map_5095 = max(best_map_5095, best_map_ema_5095)
             if best_is_ema:
                 results = ema_test_stats["results_json"]
             else:
                 results = test_stats["results_json"]
-
             class_map = results["class_map"]
             results["class_map"] = {"valid": class_map}
             with open(output_dir / "results.json", "w") as f:
                 json.dump(results, f)
-
             total_time = time.time() - start_time
             total_time_str = str(datetime.timedelta(seconds=int(total_time)))
             print('Training time {}'.format(total_time_str))
             print('Results saved to {}'.format(output_dir / "results.json"))
-            
-        
         if best_is_ema:
             self.model = self.ema_m.module
         self.model.eval()
-
-
         if args.run_test:
             best_state_dict = torch.load(output_dir / 'checkpoint_best_total.pth', map_location='cpu', weights_only=False)['model']
             model.load_state_dict(best_state_dict)
             model.eval()
-
             test_stats, _ = evaluate(
                 model, criterion, postprocessors, data_loader_test, base_ds_test, device, args=args
             )
@@ -485,24 +398,18 @@ class Model:
             results["class_map"]["test"] = test_metrics
             with open(output_dir / "results.json", "w") as f:
                 json.dump(results, f)
-
         for callback in callbacks["on_train_end"]:
             callback()
-    
     def export(self, output_dir="output", infer_dir=None, simplify=False,  backbone_only=False, opset_version=17, verbose=True, force=False, shape=None, batch_size=1, **kwargs):
-        """Export the trained model to ONNX format"""
         print(f"Exporting model to ONNX format")
         try:
             from rfdetr.deploy.export import export_onnx, onnx_simplify, make_infer_image
         except ImportError:
             print("It seems some dependencies for ONNX export are missing. Please run `pip install rfdetr[onnxexport]` and try again.")
             raise
-
-
         device = self.device
         model = deepcopy(self.model.to("cpu"))
         model.to(device)
-
         os.makedirs(output_dir, exist_ok=True)
         output_dir = Path(output_dir)
         if shape is None:
@@ -510,7 +417,6 @@ class Model:
         else:
             if shape[0] % 14 != 0 or shape[1] % 14 != 0:
                 raise ValueError("Shape must be divisible by 14")
-
         input_tensors = make_infer_image(infer_dir, shape, batch_size, device).to(device)
         input_names = ['input']
         output_names = ['features'] if backbone_only else ['dets', 'labels']
@@ -527,8 +433,6 @@ class Model:
                 print(f"PyTorch inference output shapes - Boxes: {dets.shape}, Labels: {labels.shape}")
         model.cpu()
         input_tensors = input_tensors.cpu()
-
-        # Export to ONNX
         output_file = export_onnx(
             output_dir=output_dir,
             model=model,
@@ -540,9 +444,7 @@ class Model:
             verbose=verbose,
             opset_version=opset_version
         )
-        
         print(f"Successfully exported ONNX model to: {output_file}")
-
         if simplify:
             sim_output_file = onnx_simplify(
                 onnx_dir=output_file,
@@ -551,20 +453,14 @@ class Model:
                 force=force
             )
             print(f"Successfully simplified ONNX model to: {sim_output_file}")
-        
         print("ONNX export completed successfully")
         self.model = self.model.to(device)
-            
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('LWDETR training and evaluation script', parents=[get_args_parser()])
     args = parser.parse_args()
-
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    
-    config = vars(args)  # Convert Namespace to dictionary
-    
+    config = vars(args)  
     if args.subcommand == 'distill':
         distill(**config)   
     elif args.subcommand is None:
@@ -631,15 +527,13 @@ if __name__ == '__main__':
             "shape",
         ]
         for key in filter_keys:
-            config.pop(key, None)  # Use pop with None to avoid KeyError
-            
+            config.pop(key, None)  
         from deploy.export import main as export_main
         if args.batch_size != 1:
             config['batch_size'] = 1
             print(f"Only batch_size 1 is supported for onnx export, \
                  but got batchsize = {args.batch_size}. batch_size is forcibly set to 1.")
         export_main(**config)
-
 def get_args_parser():
     parser = argparse.ArgumentParser('Set transformer detector', add_help=False)
     parser.add_argument('--num_classes', default=2, type=int)
@@ -656,15 +550,10 @@ def get_args_parser():
     parser.add_argument('--lr_vit_layer_decay', default=0.8, type=float)
     parser.add_argument('--lr_component_decay', default=1.0, type=float)
     parser.add_argument('--do_benchmark', action='store_true', help='benchmark the model')
-
-    # drop args 
-    # dropout and stochastic depth drop rate; set at most one to non-zero
     parser.add_argument('--dropout', type=float, default=0,
                         help='Drop path rate (default: 0.0)')
     parser.add_argument('--drop_path', type=float, default=0,
                         help='Drop path rate (default: 0.0)')
-
-    # early / late dropout and stochastic depth settings
     parser.add_argument('--drop_mode', type=str, default='standard',
                         choices=['standard', 'early', 'late'], help='drop mode')
     parser.add_argument('--drop_schedule', type=str, default='constant',
@@ -672,8 +561,6 @@ def get_args_parser():
                         help='drop schedule for early dropout / s.d. only')
     parser.add_argument('--cutoff_epoch', type=int, default=0,
                         help='if drop_mode is early / late, this is the epoch where dropout ends / starts')
-
-    # Model parameters
     parser.add_argument('--pretrained_encoder', type=str, default=None, 
                         help="Path to the pretrained encoder.")
     parser.add_argument('--pretrain_weights', type=str, default=None, 
@@ -682,8 +569,6 @@ def get_args_parser():
                         help="Keys you do not want to load.")
     parser.add_argument('--pretrain_keys_modify_to_load', type=str, default=None, nargs='+',
                         help="Keys you want to modify to load. Only used when loading objects365 pre-trained weights.")
-
-    # * Backbone
     parser.add_argument('--encoder', default='vit_tiny', type=str,
                         help="Name of the transformer or convolutional encoder to use")
     parser.add_argument('--vit_encoder_num_layers', default=12, type=int,
@@ -698,8 +583,6 @@ def get_args_parser():
     parser.add_argument("--rms_norm", action="store_true", dest="rms_norm")
     parser.add_argument("--backbone_lora", action="store_true", dest="backbone_lora")
     parser.add_argument("--force_no_pretrain", action="store_true", dest="force_no_pretrain")
-
-    # * Transformer
     parser.add_argument('--dec_layers', default=3, type=int,
                         help="Number of decoding layers in the transformer")
     parser.add_argument('--dim_feedforward', default=2048, type=int,
@@ -724,21 +607,16 @@ def get_args_parser():
     parser.add_argument('--decoder_norm', default='LN', type=str)
     parser.add_argument('--bbox_reparam', action='store_true')
     parser.add_argument('--freeze_batch_norm', action='store_true')
-    # * Matcher
     parser.add_argument('--set_cost_class', default=2, type=float,
                         help="Class coefficient in the matching cost")
     parser.add_argument('--set_cost_bbox', default=5, type=float,
                         help="L1 box coefficient in the matching cost")
     parser.add_argument('--set_cost_giou', default=2, type=float,
                         help="giou box coefficient in the matching cost")
-
-    # * Loss coefficients
     parser.add_argument('--cls_loss_coef', default=2, type=float)
     parser.add_argument('--bbox_loss_coef', default=5, type=float)
     parser.add_argument('--giou_loss_coef', default=2, type=float)
     parser.add_argument('--focal_alpha', default=0.25, type=float)
-    
-    # Loss
     parser.add_argument('--no_aux_loss', dest='aux_loss', action='store_false',
                         help="Disables auxiliary decoding losses (loss at each layer)")
     parser.add_argument('--sum_group_losses', action='store_true',
@@ -746,13 +624,10 @@ def get_args_parser():
     parser.add_argument('--use_varifocal_loss', action='store_true')
     parser.add_argument('--use_position_supervised_loss', action='store_true')
     parser.add_argument('--ia_bce_loss', action='store_true')
-
-    # dataset parameters
     parser.add_argument('--dataset_file', default='coco')
     parser.add_argument('--coco_path', type=str)
     parser.add_argument('--dataset_dir', type=str)
     parser.add_argument('--square_resize_div_64', action='store_true')
-
     parser.add_argument('--output_dir', default='output',
                         help='path where to save, empty for no saving')
     parser.add_argument('--dont_save_weights', action='store_true')
@@ -766,10 +641,7 @@ def get_args_parser():
     parser.add_argument('--use_ema', action='store_true')
     parser.add_argument('--ema_decay', default=0.9997, type=float)
     parser.add_argument('--ema_tau', default=0, type=float)
-
     parser.add_argument('--num_workers', default=2, type=int)
-
-    # distributed training parameters
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
     parser.add_argument('--world_size', default=1, type=int,
@@ -778,12 +650,8 @@ def get_args_parser():
                         help='url used to set up distributed training')
     parser.add_argument('--sync_bn', default=True, type=bool,
                         help='setup synchronized BatchNorm for distributed training')
-    
-    # fp16
     parser.add_argument('--fp16_eval', default=False, action='store_true',
                         help='evaluate in fp16 precision.')
-
-    # custom args
     parser.add_argument('--encoder_only', action='store_true', help='Export and benchmark encoder only')
     parser.add_argument('--backbone_only', action='store_true', help='Export and benchmark backbone only')
     parser.add_argument('--resolution', type=int, default=640, help="input resolution")
@@ -792,7 +660,6 @@ def get_args_parser():
     parser.add_argument('--expanded_scales', action='store_true', help='use expanded scales')
     parser.add_argument('--warmup_epochs', default=1, type=float, 
         help='Number of warmup epochs for linear warmup before cosine annealing')
-    # Add scheduler type argument: 'step' or 'cosine'
     parser.add_argument(
         '--lr_scheduler',
         default='step',
@@ -801,7 +668,6 @@ def get_args_parser():
     )
     parser.add_argument('--lr_min_factor', default=0.0, type=float, 
         help='Minimum learning rate factor (as a fraction of initial lr) at the end of cosine annealing')
-    # Early stopping parameters
     parser.add_argument('--early_stopping', action='store_true',
                         help='Enable early stopping based on mAP improvement')
     parser.add_argument('--early_stopping_patience', default=10, type=int,
@@ -810,11 +676,8 @@ def get_args_parser():
                         help='Minimum change in mAP to qualify as an improvement')
     parser.add_argument('--early_stopping_use_ema', action='store_true',
                         help='Use EMA model metrics for early stopping')
-    # subparsers
     subparsers = parser.add_subparsers(title='sub-commands', dest='subcommand',
         description='valid subcommands', help='additional help')
-
-    # subparser for export model
     parser_export = subparsers.add_parser('export_model', help='LWDETR model export')
     parser_export.add_argument('--infer_dir', type=str, default=None)
     parser_export.add_argument('--verbose', type=ast.literal_eval, default=False, nargs="?", const=True)
@@ -826,9 +689,7 @@ def get_args_parser():
     parser_export.add_argument('--profile', action='store_true', help='Run nsys profiling during TensorRT export')
     parser_export.add_argument('--shape', type=int, nargs=2, default=(640, 640), help="input shape (width, height)")
     return parser
-
 def populate_args(
-    # Basic training parameters
     num_classes=2,
     grad_accum_steps=1,
     amp=False,
@@ -842,22 +703,16 @@ def populate_args(
     lr_vit_layer_decay=0.8,
     lr_component_decay=1.0,
     do_benchmark=False,
-    
-    # Drop parameters
     dropout=0,
     drop_path=0,
     drop_mode='standard',
     drop_schedule='constant',
     cutoff_epoch=0,
-    
-    # Model parameters
     pretrained_encoder=None,
     pretrain_weights=None, 
     pretrain_exclude_keys=None,
     pretrain_keys_modify_to_load=None,
     pretrained_distiller=None,
-    
-    # Backbone parameters
     encoder='vit_tiny',
     vit_encoder_num_layers=12,
     window_block_indexes=None,
@@ -868,8 +723,6 @@ def populate_args(
     rms_norm=False,
     backbone_lora=False,
     force_no_pretrain=False,
-    
-    # Transformer parameters
     dec_layers=3,
     dim_feedforward=2048,
     hidden_dim=256,
@@ -885,13 +738,9 @@ def populate_args(
     decoder_norm='LN',
     bbox_reparam=False,
     freeze_batch_norm=False,
-    
-    # Matcher parameters
     set_cost_class=2,
     set_cost_bbox=5,
     set_cost_giou=2,
-    
-    # Loss coefficients
     cls_loss_coef=2,
     bbox_loss_coef=5,
     giou_loss_coef=2,
@@ -901,14 +750,10 @@ def populate_args(
     use_varifocal_loss=False,
     use_position_supervised_loss=False,
     ia_bce_loss=False,
-    
-    # Dataset parameters
     dataset_file='coco',
     coco_path=None,
     dataset_dir=None,
     square_resize_div_64=False,
-    
-    # Output parameters
     output_dir='output',
     dont_save_weights=False,
     checkpoint_interval=10,
@@ -920,17 +765,11 @@ def populate_args(
     ema_decay=0.9997,
     ema_tau=0,
     num_workers=2,
-    
-    # Distributed training parameters
     device='cuda',
     world_size=1,
     dist_url='env://',
     sync_bn=True,
-    
-    # FP16
     fp16_eval=False,
-    
-    # Custom args
     encoder_only=False,
     backbone_only=False,
     resolution=640,
@@ -940,15 +779,13 @@ def populate_args(
     warmup_epochs=1,
     lr_scheduler='step',
     lr_min_factor=0.0,
-    # Early stopping parameters
     early_stopping=True,
     early_stopping_patience=10,
     early_stopping_min_delta=0.001,
     early_stopping_use_ema=False,
     gradient_checkpointing=False,
-    # Additional
     subcommand=None,
-    **extra_kwargs  # To handle any unexpected arguments
+    **extra_kwargs  
 ):
     args = argparse.Namespace(
         num_classes=num_classes,

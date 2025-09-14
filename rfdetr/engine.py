@@ -1,31 +1,9 @@
-# ------------------------------------------------------------------------
-# RF-DETR
-# Copyright (c) 2025 Roboflow. All Rights Reserved.
-# Licensed under the Apache License, Version 2.0 [see LICENSE for details]
-# ------------------------------------------------------------------------
-# Modified from LW-DETR (https://github.com/Atten4Vis/LW-DETR)
-# Copyright (c) 2024 Baidu. All Rights Reserved.
-# ------------------------------------------------------------------------
-# Conditional DETR
-# Copyright (c) 2021 Microsoft. All Rights Reserved.
-# Licensed under the Apache License, Version 2.0 [see LICENSE for details]
-# ------------------------------------------------------------------------
-# Copied from DETR (https://github.com/facebookresearch/detr)
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved.
-# ------------------------------------------------------------------------
-
-"""
-Train and eval functions used in main.py
-"""
 import math
 import sys
 from typing import Iterable
-
 import torch
-
 import rfdetr.util.misc as utils
 from rfdetr.datasets.coco_eval import CocoEvaluator
-
 try:
     from torch.amp import autocast, GradScaler
     DEPRECATED_AMP = False
@@ -35,14 +13,11 @@ except ImportError:
 from typing import DefaultDict, List, Callable
 from rfdetr.util.misc import NestedTensor
 import numpy as np
-
 def get_autocast_args(args):
     if DEPRECATED_AMP:
         return {'enabled': args.amp, 'dtype': torch.bfloat16}
     else:
         return {'device_type': 'cuda', 'enabled': args.amp, 'dtype': torch.bfloat16}
-
-
 def train_one_epoch(
     model: torch.nn.Module,
     criterion: torch.nn.Module,
@@ -68,16 +43,12 @@ def train_one_epoch(
     header = "Epoch: [{}]".format(epoch)
     print_freq = 10
     start_steps = epoch * num_training_steps_per_epoch
-
     print("Grad accum steps: ", args.grad_accum_steps)
     print("Total batch size: ", batch_size * utils.get_world_size())
-
-    # Add gradient scaler for AMP
     if DEPRECATED_AMP:
         scaler = GradScaler(enabled=args.amp)
     else:
         scaler = GradScaler('cuda', enabled=args.amp)
-
     optimizer.zero_grad()
     assert batch_size % args.grad_accum_steps == 0
     sub_batch_size = batch_size // args.grad_accum_steps
@@ -105,7 +76,6 @@ def train_one_epoch(
                 model.module.update_dropout(schedules["do"][it])
             else:
                 model.update_dropout(schedules["do"][it])
-
         for i in range(args.grad_accum_steps):
             start_idx = i * sub_batch_size
             final_idx = start_idx + sub_batch_size
@@ -113,7 +83,6 @@ def train_one_epoch(
             new_samples = NestedTensor(new_samples_tensors, samples.mask[start_idx:final_idx])
             new_samples = new_samples.to(device)
             new_targets = [{k: v.to(device) for k, v in t.items()} for t in targets[start_idx:final_idx]]
-
             with autocast(**get_autocast_args(args)):
                 outputs = model(new_samples, new_targets)
                 loss_dict = criterion(outputs, new_targets)
@@ -123,11 +92,7 @@ def train_one_epoch(
                     for k in loss_dict.keys()
                     if k in weight_dict
                 )
-
-
             scaler.scale(losses).backward()
-
-        # reduce losses over all GPUs for logging purposes
         loss_dict_reduced = utils.reduce_dict(loss_dict)
         loss_dict_reduced_unscaled = {
             f"{k}_unscaled": v for k, v in loss_dict_reduced.items()
@@ -138,17 +103,13 @@ def train_one_epoch(
             if k in weight_dict
         }
         losses_reduced_scaled = sum(loss_dict_reduced_scaled.values())
-
         loss_value = losses_reduced_scaled.item()
-
         if not math.isfinite(loss_value):
             print(loss_dict_reduced)
             raise ValueError("Loss is {}, stopping training".format(loss_value))
-
         if max_norm > 0:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-
         scaler.step(optimizer)
         scaler.update()
         lr_scheduler.step()
@@ -161,44 +122,28 @@ def train_one_epoch(
         )
         metric_logger.update(class_error=loss_dict_reduced["class_error"])
         metric_logger.update(lr=optimizer.param_groups[0]["lr"])
-    # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
-
-
 def coco_extended_metrics(coco_eval):
-    """
-    Safe version: ignores the –1 sentinel entries so precision/F1 never explode.
-    """
-
     iou_thrs, rec_thrs = coco_eval.params.iouThrs, coco_eval.params.recThrs
     iou50_idx, area_idx, maxdet_idx = (
         int(np.argwhere(np.isclose(iou_thrs, 0.50))), 0, 2)
-
     P = coco_eval.eval["precision"]
     S = coco_eval.eval["scores"]
-
     prec_raw = P[iou50_idx, :, :, area_idx, maxdet_idx]
-
     prec = prec_raw.copy().astype(float)
     prec[prec < 0] = np.nan
-
     f1_cls   = 2 * prec * rec_thrs[:, None] / (prec + rec_thrs[:, None])
     f1_macro = np.nanmean(f1_cls, axis=1)
-
     best_j   = int(f1_macro.argmax())
-
     macro_precision = float(np.nanmean(prec[best_j]))
     macro_recall    = float(rec_thrs[best_j])
     macro_f1        = float(f1_macro[best_j])
-
     score_vec = S[iou50_idx, best_j, :, area_idx, maxdet_idx].astype(float)
     score_vec[prec_raw[best_j] < 0] = np.nan
     score_thr = float(np.nanmean(score_vec))
-
     map_50_95, map_50 = float(coco_eval.stats[0]), float(coco_eval.stats[1])
-
     per_class = []
     cat_ids = coco_eval.params.catIds
     cat_id_to_name = {c["id"]: c["name"] for c in coco_eval.cocoGt.loadCats(cat_ids)}
@@ -207,14 +152,10 @@ def coco_extended_metrics(coco_eval):
         valid   = p_slice > -1
         ap_50_95 = float(p_slice[valid].mean()) if valid.any() else float("nan")
         ap_50    = float(p_slice[iou50_idx][p_slice[iou50_idx] > -1].mean()) if (p_slice[iou50_idx] > -1).any() else float("nan")
-
         pc = float(prec[best_j, k]) if prec_raw[best_j, k] > -1 else float("nan")
         rc = macro_recall
-
-        #Doing to this to filter out dataset class
         if np.isnan(ap_50_95) or np.isnan(ap_50) or np.isnan(pc) or np.isnan(rc):
             continue
-
         per_class.append({
             "class"      : cat_id_to_name[int(cid)],
             "map@50:95"  : ap_50_95,
@@ -222,7 +163,6 @@ def coco_extended_metrics(coco_eval):
             "precision"  : pc,
             "recall"     : rc,
         })
-
     per_class.append({
         "class"     : "all",
         "map@50:95" : map_50_95,
@@ -230,40 +170,31 @@ def coco_extended_metrics(coco_eval):
         "precision" : macro_precision,
         "recall"    : macro_recall,
     })
-
     return {
         "class_map": per_class,
         "map"      : map_50,
         "precision": macro_precision,
         "recall"   : macro_recall
     }
-
 def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, args=None):
     model.eval()
     if args.fp16_eval:
         model.half()
     criterion.eval()
-
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter(
         "class_error", utils.SmoothedValue(window_size=1, fmt="{value:.2f}")
     )
     header = "Test:"
-
     iou_types = tuple(k for k in ("segm", "bbox") if k in postprocessors.keys())
     coco_evaluator = CocoEvaluator(base_ds, iou_types)
-
     for samples, targets in metric_logger.log_every(data_loader, 10, header):
         samples = samples.to(device)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-
         if args.fp16_eval:
             samples.tensors = samples.tensors.half()
-
-        # Add autocast for evaluation
         with autocast(**get_autocast_args(args)):
             outputs = model(samples)
-
         if args.fp16_eval:
             for key in outputs.keys():
                 if key == "enc_outputs":
@@ -277,11 +208,8 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, arg
                             ].float()
                 else:
                     outputs[key] = outputs[key].float()
-
         loss_dict = criterion(outputs, targets)
         weight_dict = criterion.weight_dict
-
-        # reduce losses over all GPUs for logging purposes
         loss_dict_reduced = utils.reduce_dict(loss_dict)
         loss_dict_reduced_scaled = {
             k: v * weight_dict[k]
@@ -297,7 +225,6 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, arg
             **loss_dict_reduced_unscaled,
         )
         metric_logger.update(class_error=loss_dict_reduced["class_error"])
-
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
         results = postprocessors["bbox"](outputs, orig_target_sizes)
         res = {
@@ -306,14 +233,10 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, arg
         }
         if coco_evaluator is not None:
             coco_evaluator.update(res)
-
-    # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     if coco_evaluator is not None:
         coco_evaluator.synchronize_between_processes()
-
-    # accumulate predictions from all images
     if coco_evaluator is not None:
         coco_evaluator.accumulate()
         coco_evaluator.summarize()
@@ -323,7 +246,6 @@ def evaluate(model, criterion, postprocessors, data_loader, base_ds, device, arg
         stats["results_json"] = results_json
         if "bbox" in postprocessors.keys():
             stats["coco_eval_bbox"] = coco_evaluator.coco_eval["bbox"].stats.tolist()
-
         if "segm" in postprocessors.keys():
             stats["coco_eval_masks"] = coco_evaluator.coco_eval["segm"].stats.tolist()
     return stats, coco_evaluator
